@@ -43,6 +43,17 @@ func (r *Router) listen() {
 	defer conn.Close()
 
 	for {
+		buf := make([]byte, 4096)
+		_, srcAddr, err := conn.ReadFromUDP(buf)
+		checkError(err)
+
+		data := bytes.NewBuffer(buf)
+		decoder := gob.NewDecoder(data)
+		var srcRouter Router
+		err = decoder.Decode(&srcRouter) //input must be memory address
+		checkError(err)
+
+		srcTable = srcRouter.RoutingTable
 
 	}
 }
