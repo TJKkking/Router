@@ -17,6 +17,7 @@ const (
 	IPv4_address = "127.0.0.1"
 	TTL          = 32
 	LOOP         = 30
+	MAX_HOP      = 16
 )
 
 type Router struct {
@@ -30,6 +31,13 @@ type TableEntry struct {
 	Refused  bool
 	Route    []string
 	Distance int
+}
+
+type DataPacket struct {
+	Source      string
+	Destination string
+	TTL         int
+	Payload     string
 }
 
 // point to router instance created by user
@@ -96,6 +104,64 @@ func (r *Router) Listen() {
 	}
 }
 
+func (r *Router) receivePacket() {
+	lsAddr := &net.UDPAddr{IP: net.ParseIP(IPv4_address), Port: r.Port + 1000} // 1000 offset
+	conn, err := net.ListenUDP("udp", lsAddr)
+	checkError("net.ListenUDP", err)
+	defer conn.Close()
+
+	for {
+		buf := make([]byte, 4096)
+		_, _, err := conn.ReadFromUDP(buf)
+		checkError("ReadFromUDP", err)
+
+		data := bytes.NewBuffer(buf)
+		decoder := gob.NewDecoder(data)
+		var packet DataPacket
+		err = decoder.Decode(&packet) //input must be memory address
+		checkError("Decode", err)
+		log.Println("[DataPacket]Router " + r.ID + " receive DataPacket")
+
+		dis := r.RoutingTable[packet.Destination].Distance
+		// no neighbor
+		if len(r.Neighbors) == 0 {
+			fmt.Println("Router ", r.ID, ": No route to ", packet.Destination)
+			continue
+		}
+		// no route
+		if _, ok := r.RoutingTable[packet.Destination]; !ok {
+			fmt.Println("Router ", r.ID, ": Dropped ", packet.Destination)
+			continue
+		}
+		// unreachable
+		if dis > MAX_HOP {
+			fmt.Println("Router ", r.ID, ": Dropped ", packet.Destination)
+			continue
+		}
+		// refused
+		route := r.RoutingTable[packet.Destination].Route
+		if r.refuseCheck(route) {
+			fmt.Println("Router ", r.ID, ": Refuse route to ", packet.Destination)
+			continue
+		}
+
+		// destination
+		if packet.Destination == r.ID { // arrive
+			fmt.Println("Router ", r.ID, ": Destination ", packet.Destination)
+		} else if packet.TTL == 0 { // ttl = 0
+			fmt.Println("Router ", r.ID, ": Time exceeded ", packet.Destination)
+		} else if dis == 1 { // neighbor is des
+			err := r.sendPacket(packet.Source, packet.Destination, packet.TTL-1, packet.Payload)
+			checkError("sendPacket neighbor", err)
+			fmt.Println("Router ", r.ID, ": Direct to ", packet.Destination)
+		} else if dis > 1 && dis < MAX_HOP { // forward
+			err := r.sendPacket(packet.Source, packet.Destination, packet.TTL-1, packet.Payload)
+			checkError("sendPacket forward", err)
+			fmt.Println("Router ", r.ID, ": Forward to ", packet.Destination)
+		}
+	}
+}
+
 func (r *Router) refuseCheck(route []string) bool {
 	var isRefused bool = false
 	for _, y := range route {
@@ -114,7 +180,7 @@ func (r *Router) Broadcast() {
 			dstAddr, err := net.ResolveUDPAddr("udp", address)
 			checkError("ResolveUDPAddr", err)
 
-			err = sendRoutingTable(dstAddr, r)
+			err = r.sendRoutingTable(dstAddr)
 			checkError("sendRoutingTable", err)
 		}
 		log.Printf("[Broadcast]Router %s send a update\n", r.ID)
@@ -122,7 +188,7 @@ func (r *Router) Broadcast() {
 	}
 }
 
-func sendRoutingTable(dstAddr *net.UDPAddr, r *Router) error { //todo r *Router
+func (r *Router) sendRoutingTable(dstAddr *net.UDPAddr) error { //todo r *Router, done, tobe test
 	//srcAddr := &net.UDPAddr{IP: net.IP(IPv4_address), Port: r.Port}
 	conn, err := net.DialUDP("udp", nil, dstAddr) // use random port to send data
 	checkError("DialUDP", err)
@@ -158,8 +224,32 @@ func (r *Router) printTable() {
 	}
 }
 
-func (r *Router) Daemon() {
+func (r *Router) sendPacket(src string, des string, ttl int, payload string) error { // reassembly & sending
+	//todo, done, to be test
+	address := IPv4_address + ":" + strconv.Itoa(routers[des].Port)
+	dstAddr, err := net.ResolveUDPAddr("udp", address)
+	checkError("ResolveUDPAddr", err)
 
+	conn, err := net.DialUDP("udp", nil, dstAddr)
+	checkError("DialUDP", err)
+	defer conn.Close()
+
+	//reassembly
+	pack := &DataPacket{
+		Source:      src,
+		Destination: des,
+		TTL:         ttl,
+		Payload:     payload,
+	}
+	var network bytes.Buffer
+	enc := gob.NewEncoder(&network)
+	gob.Register(pack) //Regist type
+	err = enc.Encode(pack)
+	checkError("Encode", err)
+	_, err = conn.Write(network.Bytes())
+	defer network.Reset()
+
+	return err
 }
 
 func checkError(head string, err error) {
@@ -239,6 +329,47 @@ func CheckSwitch(command []string) error {
 	return nil
 }
 
+func (r *Router) PrintAdj() {
+	var isEmpty bool = true
+	for k, v := range r.RoutingTable {
+		if v.Distance == 1 {
+			isEmpty = false
+			fmt.Print(k, " ")
+		}
+	}
+	if isEmpty {
+		fmt.Print("Empty")
+	}
+	fmt.Print("\n")
+}
+
+func (r *Router) RefuseNode(input []string) error {
+	if len(input) != 2 {
+		return fmt.Errorf("Invalid input!")
+	}
+	if _, ok := r.RoutingTable[input[1]]; ok {
+		r.RoutingTable[input[1]] = TableEntry{
+			Refused:  true,
+			Distance: r.RoutingTable[input[1]].Distance, // 可达
+			Route:    r.RoutingTable[input[1]].Route,
+		}
+	} else {
+		r.RoutingTable[input[1]] = TableEntry{ // not exist
+			Refused:  true,
+			Distance: MAX_HOP,
+			Route:    []string{},
+		}
+	}
+	return nil
+}
+
+func statistics() {
+	//num of routers
+	//router list (id, port, nbs)
+	//detail  of each router(receive, broadcast, update, table-wide)
+
+}
+
 func main() {
 	fmt.Println("[INFO]The router execution environment is initialized successfully!")
 	fmt.Println("[warm]NO ROUTER in the environment!")
@@ -261,6 +392,7 @@ func main() {
 
 		switch command[0] {
 		case "router": //create a new router
+			// todo validating parameters[ID, port] 2000<port<3000
 			err := initRouter(command)
 			checkError("initRouter", err)
 			if curRouter == "none" {
@@ -268,6 +400,10 @@ func main() {
 			}
 
 		case "RT": // print routing table
+			if curRouter == "none" {
+				fmt.Println("[ERROR] No router has been created yet.")
+				continue
+			}
 			routers[curRouter].printTable()
 
 		case "SW": // switch to another router
@@ -278,6 +414,22 @@ func main() {
 				continue
 			}
 			curRouter = command[1]
+
+		case "N": // Print activity’s adjacent list.
+			// to be test
+			routers[curRouter].PrintAdj()
+
+		case "D":
+			//todo
+			//optional ttl
+		case "P":
+			//todo
+		case "R":
+			//todo check
+			routers[curRouter].RefuseNode(command)
+		case "S":
+			//todo
+			statistics()
 		}
 	}
 }
