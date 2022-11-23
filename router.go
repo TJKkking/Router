@@ -15,7 +15,7 @@ import (
 
 const (
 	IPv4_address = "127.0.0.1"
-	TTL          = 64
+	TTL          = 32
 	LOOP         = 30
 )
 
@@ -32,6 +32,7 @@ type TableEntry struct {
 	Distance int
 }
 
+// point to router instance created by user
 var routers map[string]*Router
 
 func (r *Router) Listen() {
@@ -89,7 +90,7 @@ func (r *Router) Listen() {
 				}
 			}
 		}
-		// todo: save update info to log
+		// todo: save update INFO to log
 		// todo: loop?
 	}
 }
@@ -138,24 +139,93 @@ func sendRoutingTable(dstAddr *net.UDPAddr, r *Router) error { //todo r *Router
 	return err
 }
 
+func (r *Router) printTable() {
+	for k, v := range r.RoutingTable {
+		if r.ID == k {
+			continue
+		}
+		fmt.Print("     ", k, "        ", v.Distance, "   ")
+		for i := 0; i < len(v.Route); i++ {
+			fmt.Print(v.Route[i])
+			if i < len(v.Route)-1 {
+				fmt.Print(",")
+			}
+		}
+		fmt.Println()
+	}
+}
+
 func (r *Router) Daemon() {
 
 }
 
 func checkError(err error) {
 	if err != nil {
-		fmt.Println("Some error occurred: " + err.Error())
+		fmt.Println("[ERROR]Some error occurred: " + err.Error())
 		return
 	}
 }
 
-func main() {
-	fmt.Println("[info]The router execution environment is initialized successfully!")
-	fmt.Println("[warm]NO ROUTER in the environment!")
-	fmt.Println("[info]You can use command [router ID myport port1 port2 port3…] to create a router")
-	fmt.Println("[info]Example: router 4 3004 3003 3006 3005")
+/*
+* input
+* 0 "router"
+* 1 id
+* 2 myPort
+* 3 nbPort []string
+ */
+func initRouter(input []string) error { // nbs contain nbs' port
+	cur := input[1]
+	if routers[cur] != nil {
+		//log.Println("[ERROE]init faild, router " + cur + "already exist")
+		return fmt.Errorf("[ERROE]init faild, router " + cur + "already exist")
+	}
 
-	//var routers []Router
+	var nbs []int
+	port, _ := strconv.Atoi(input[2])
+	for _, v := range input[3:] {
+		nbport, _ := strconv.Atoi(v)
+		nbs = append(nbs, nbport)
+	}
+	routers[cur] = NewRouter(input[1], port, nbs)
+
+	fmt.Println("NEW ROUTER:")
+	fmt.Println("id: " + routers[cur].ID)
+	fmt.Printf("port: %d\n", routers[cur].Port)
+	fmt.Print("Neighbors: ")
+	fmt.Println(routers[cur].Neighbors)
+
+	//加入指向自己的路由项to broadcast
+	routers[cur].RoutingTable[cur] = TableEntry{
+		Refused:  false,
+		Route:    []string{},
+		Distance: 0,
+	}
+
+	go routers[cur].Listen()
+	go routers[cur].Broadcast()
+	fmt.Println("[INFO]init Router id: " + cur + ", port: " + input[2])
+
+	return nil
+}
+
+func NewRouter(id string, port int, nbs []int) *Router {
+	return &Router{
+		ID:           id,
+		Port:         port,
+		Neighbors:    nbs,
+		RoutingTable: make(map[string]TableEntry),
+	}
+}
+
+func main() {
+	fmt.Println("[INFO]The router execution environment is initialized successfully!")
+	fmt.Println("[warm]NO ROUTER in the environment!")
+	fmt.Println("[INFO]You can use command [router ID myport port1 port2 port3…] to create a router")
+	fmt.Println("[INFO]Example: router 4 3004 3003 3006 3005")
+
+	// 分配内存空间，nil map 不能赋值
+	routers = make(map[string]*Router)
+
 	var curRouter string = "none"
 	for {
 		fmt.Println("\nCurrent Router: " + curRouter)
@@ -166,34 +236,16 @@ func main() {
 
 		input = strings.TrimSpace(input)
 		command := strings.Split(input, " ")
-		// for _, v := range command {
-		// 	fmt.Printf("input: %s\n", v)
-		// }
 
 		switch command[0] {
 		case "router": //create a new router
-			initRouter(command)
+			err := initRouter(command)
+			checkError(err)
+			curRouter = command[1]
+		case "RT": // print routing table
+			routers[curRouter].printTable()
+		case "SW": // switch to another router
+			//todo check des num
 		}
 	}
-}
-
-func initRouter(input []string) { // nbs contain nbs' port
-	cur := input[0]
-	// todo 查重
-	var router []int
-	port, _ := strconv.Atoi(input[1])
-	for _, v := range input[2:] {
-		nbport, _ := strconv.Atoi(v)
-		router = append(router, nbport)
-	}
-	routers[cur] = &Router{ // todo 值传递是否会有问题
-		ID:           input[0],
-		Port:         port,
-		Neighbors:    router,
-		RoutingTable: make(map[string]TableEntry),
-	}
-
-	go routers[cur].Listen()
-	go routers[cur].Broadcast()
-	fmt.Println("[info]init Router id: " + cur + "port: " + input[1])
 }
