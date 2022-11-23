@@ -36,22 +36,22 @@ type TableEntry struct {
 var routers map[string]*Router
 
 func (r *Router) Listen() {
-	lsAddr := &net.UDPAddr{IP: net.IP(IPv4_address), Port: r.Port}
+	lsAddr := &net.UDPAddr{IP: net.ParseIP(IPv4_address), Port: r.Port}
 	conn, err := net.ListenUDP("udp", lsAddr)
-	checkError(err)
+	checkError("net.ListenUDP", err)
 	defer conn.Close()
 
 	for {
 		buf := make([]byte, 4096)
-		_, srcAddr, err := conn.ReadFromUDP(buf)
-		checkError(err)
-		log.Printf("[receive]table from port: %d\n", srcAddr.Port)
+		_, _, err := conn.ReadFromUDP(buf)
+		checkError("ReadFromUDP", err)
 
 		data := bytes.NewBuffer(buf)
 		decoder := gob.NewDecoder(data)
 		var srcRouter Router
 		err = decoder.Decode(&srcRouter) //input must be memory address
-		checkError(err)
+		checkError("Decode", err)
+		log.Println("[Receive]Router " + r.ID + " receive table from [Router " + srcRouter.ID + "]")
 
 		srcTable := srcRouter.RoutingTable
 		for k, v := range srcTable {
@@ -60,16 +60,17 @@ func (r *Router) Listen() {
 			}
 			if _, ok := r.RoutingTable[k]; ok { //already existed
 				var tobeUpdate bool = false
-				if r.RoutingTable[k].Route[0] == v.Route[0] { // 下一跳相同
+				// 排除自路由项&邻居的自路由项
+				if (r.ID != k) && len(v.Route) > 0 && (r.RoutingTable[k].Route[0] == v.Route[0]) { // 下一跳相同
 					if !r.refuseCheck(v.Route) { // 不包含refused node 更新
 						tobeUpdate = true
-						log.Println("[update][router-" + r.ID + ", from-" + srcRouter.ID + ", des-" + k + "]node already existed, same next hop")
+						log.Println("[Update][router-" + r.ID + ", from-" + srcRouter.ID + ", des-" + k + "]node already existed, same next hop")
 					}
 
 				} else if r.RoutingTable[k].Distance > v.Distance+1 { // 下一跳不同且path更短
 					if !r.refuseCheck(v.Route) { // 不包含refused node 更新
 						tobeUpdate = true
-						log.Println("[update][router-" + r.ID + ", from-" + srcRouter.ID + ", des-" + k + "]node already existed, different next hop")
+						log.Println("[Update][router-" + r.ID + ", from-" + srcRouter.ID + ", des-" + k + "]node already existed, different next hop")
 					}
 				}
 				if tobeUpdate { // update routing table
@@ -86,7 +87,7 @@ func (r *Router) Listen() {
 						Refused:  false,
 						Route:    append([]string{srcRouter.ID}, v.Route...),
 					}
-					log.Printf("[update][router-" + r.ID + ", from-" + srcRouter.ID + ", des-" + k + "]new node\n")
+					log.Println("[Update][router " + r.ID + ", des " + k + " from router " + srcRouter.ID + "" + "]new node")
 				}
 			}
 		}
@@ -111,10 +112,10 @@ func (r *Router) Broadcast() {
 		for _, port := range r.Neighbors {
 			address := IPv4_address + ":" + strconv.Itoa(port)
 			dstAddr, err := net.ResolveUDPAddr("udp", address)
-			checkError(err)
+			checkError("ResolveUDPAddr", err)
 
 			err = sendRoutingTable(dstAddr, r)
-			checkError(err)
+			checkError("sendRoutingTable", err)
 		}
 		log.Printf("[Broadcast]Router %s send a update\n", r.ID)
 		time.Sleep(LOOP * time.Second)
@@ -124,27 +125,29 @@ func (r *Router) Broadcast() {
 func sendRoutingTable(dstAddr *net.UDPAddr, r *Router) error { //todo r *Router
 	//srcAddr := &net.UDPAddr{IP: net.IP(IPv4_address), Port: r.Port}
 	conn, err := net.DialUDP("udp", nil, dstAddr) // use random port to send data
-	checkError(err)
+	checkError("DialUDP", err)
 	defer conn.Close()
 
 	var network bytes.Buffer
 	enc := gob.NewEncoder(&network)
 	gob.Register(r) //Regist type
 	err = enc.Encode(r)
-	checkError(err)
+	checkError("Encode", err)
 
-	n, err := conn.Write(network.Bytes())
+	// 返回字节数n省略
+	_, err = conn.Write(network.Bytes())
 	defer network.Reset()
-	fmt.Printf("Router "+r.ID+"send %d bytes data to Port: %d\n", n, dstAddr.Port)
+	//fmt.Printf("[Router "+r.ID+"] send %d bytes data to Port: %d\n", n, dstAddr.Port)
 	return err
 }
 
 func (r *Router) printTable() {
+	fmt.Println("     Destination  Distance  Route")
 	for k, v := range r.RoutingTable {
 		if r.ID == k {
 			continue
 		}
-		fmt.Print("     ", k, "        ", v.Distance, "   ")
+		fmt.Print("     ", k, "            ", v.Distance, "          ")
 		for i := 0; i < len(v.Route); i++ {
 			fmt.Print(v.Route[i])
 			if i < len(v.Route)-1 {
@@ -159,9 +162,9 @@ func (r *Router) Daemon() {
 
 }
 
-func checkError(err error) {
+func checkError(head string, err error) {
 	if err != nil {
-		fmt.Println("[ERROR]Some error occurred: " + err.Error())
+		fmt.Println("[ERROR]Error in " + head + ": " + err.Error())
 		return
 	}
 }
@@ -171,7 +174,7 @@ func checkError(err error) {
 * 0 "router"
 * 1 id
 * 2 myPort
-* 3 nbPort []string
+* 3 nbPorts []string
  */
 func initRouter(input []string) error { // nbs contain nbs' port
 	cur := input[1]
@@ -217,6 +220,25 @@ func NewRouter(id string, port int, nbs []int) *Router {
 	}
 }
 
+func CheckSwitch(command []string) error {
+	// Missing parameter
+	if len(command) < 2 {
+		return fmt.Errorf("Missing parameter: [ID]")
+	}
+
+	// Too many parameters
+	if len(command) > 2 {
+		return fmt.Errorf("Too many parameters!")
+	}
+
+	// invalid parameter
+	if routers[command[1]] == nil {
+		return fmt.Errorf("Invalid parameter: [ID]")
+	}
+
+	return nil
+}
+
 func main() {
 	fmt.Println("[INFO]The router execution environment is initialized successfully!")
 	fmt.Println("[warm]NO ROUTER in the environment!")
@@ -232,7 +254,7 @@ func main() {
 		fmt.Print("> ")
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
-		checkError(err)
+		checkError("ReadString", err)
 
 		input = strings.TrimSpace(input)
 		command := strings.Split(input, " ")
@@ -240,12 +262,22 @@ func main() {
 		switch command[0] {
 		case "router": //create a new router
 			err := initRouter(command)
-			checkError(err)
-			curRouter = command[1]
+			checkError("initRouter", err)
+			if curRouter == "none" {
+				curRouter = command[1]
+			}
+
 		case "RT": // print routing table
 			routers[curRouter].printTable()
+
 		case "SW": // switch to another router
-			//todo check des num
+			err = CheckSwitch(command)
+			if err != nil {
+				fmt.Printf("[ERROR] %v\n", err)
+				fmt.Println("[Usage] SW [ID]    example: SW 2")
+				continue
+			}
+			curRouter = command[1]
 		}
 	}
 }
