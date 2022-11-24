@@ -413,6 +413,27 @@ func (r *Router) sendProcess(input []string) error {
 	return err
 }
 
+func (r *Router) priority(input []string) error {
+	curNode := r.ID
+	desNode := input[len(input)-1]
+	path := []string{}
+	for _, v := range input[2:] { //n1 - nk
+		if _, ok := routers[curNode].RoutingTable[v]; ok { // next node is reachable
+			path = append(path, routers[curNode].RoutingTable[v].Route...)
+			curNode = v
+		} else {
+			return fmt.Errorf("[Faild] Faild to specify priority route: Router " + curNode + " CAN NOT route to Router " + v)
+		}
+	}
+	// set priority route
+	r.RoutingTable[desNode] = TableEntry{
+		Route:    path,
+		Distance: len(path),
+		Refused:  r.RoutingTable[desNode].Refused,
+	}
+	return nil
+}
+
 func statistics() {
 	num := len(routers)
 	fmt.Println("=======================statistics=======================")
@@ -491,7 +512,11 @@ func main() {
 		case "D":
 			routers[curRouter].sendProcess(command)
 		case "P":
-			//todo
+			err = routers[curRouter].priority(command)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
 		case "R":
 			routers[curRouter].RefuseNode(command)
 		case "S":
