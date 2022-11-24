@@ -27,6 +27,7 @@ type Router struct {
 	Port         int
 	Neighbors    []int
 	RoutingTable map[string]TableEntry
+	info         InfoSet
 }
 
 type TableEntry struct {
@@ -40,6 +41,12 @@ type DataPacket struct {
 	Destination string
 	TTL         int
 	Payload     string
+}
+
+type InfoSet struct {
+	BroadTimes   int
+	UpdateTimes  int
+	ForwardTimes int
 }
 
 // todo usage of checkError()
@@ -90,6 +97,7 @@ func (r *Router) Listen() {
 						Distance: v.Distance + 1,
 						Route:    append([]string{srcRouter.ID}, v.Route...),
 					}
+					r.info.UpdateTimes += 1
 				}
 			} else { // new table entry
 				if !r.refuseCheck(v.Route) { // 新节点且path不包含refused node
@@ -98,6 +106,7 @@ func (r *Router) Listen() {
 						Refused:  false,
 						Route:    append([]string{srcRouter.ID}, v.Route...),
 					}
+					r.info.UpdateTimes += 1
 					log.Println("[Update][router " + r.ID + ", des " + k + " from router " + srcRouter.ID + "" + "]new node")
 				}
 			}
@@ -163,12 +172,14 @@ func (r *Router) forward(packet DataPacket) error {
 			return err
 		}
 		fmt.Println("Router", r.ID, ": Direct to ", packet.Destination)
+		r.info.ForwardTimes += 1
 	} else if dis > 1 && dis < MAX_HOP { // forward
 		err = r.sendPacket(packet.Source, r.RoutingTable[packet.Destination].Route[0], packet.TTL-1, packet.Payload)
 		if err != nil {
 			return err
 		}
 		fmt.Println("Router", r.ID, ": Forward to ", packet.Destination)
+		r.info.ForwardTimes += 1
 	}
 	return err
 }
@@ -222,6 +233,7 @@ func (r *Router) Broadcast() {
 			checkError("sendRoutingTable", err)
 		}
 		log.Printf("[Broadcast]Router %s send a update\n", r.ID)
+		r.info.BroadTimes += 1
 		time.Sleep(LOOP * time.Second)
 	}
 }
@@ -245,7 +257,7 @@ func (r *Router) sendRoutingTable(dstAddr *net.UDPAddr) error {
 	return err
 }
 
-func (r *Router) printTable() {
+func (r *Router) printTable() { // todo route 不包含des
 	fmt.Println("     Destination  Distance  Route")
 	for k, v := range r.RoutingTable {
 		if r.ID == k {
@@ -303,6 +315,9 @@ func initRouter(input []string) error { // nbs contain nbs' port
 		Route:    []string{},
 		Distance: 0,
 	}
+	routers[cur].info.BroadTimes = 0
+	routers[cur].info.ForwardTimes = 0
+	routers[cur].info.UpdateTimes = 0
 
 	go routers[cur].Listen()
 	go routers[cur].Broadcast()
@@ -318,6 +333,7 @@ func NewRouter(id string, port int, nbs []int) *Router {
 		Port:         port,
 		Neighbors:    nbs,
 		RoutingTable: make(map[string]TableEntry),
+		info:         InfoSet{},
 	}
 }
 
@@ -398,10 +414,28 @@ func (r *Router) sendProcess(input []string) error {
 }
 
 func statistics() {
-	//num of routers
-	//router list (id, port, nbs)
-	//detail  of each router(receive, broadcast, update, table-wide)
-
+	num := len(routers)
+	fmt.Println("=======================statistics=======================")
+	fmt.Println(" Total number of Routers:", num)
+	fmt.Print("\n")
+	fmt.Println("  ID    Port    Neighbors    RefuseNode    [Times of Broadcast]  [Times of Update]  [Times of Forward]")
+	for _, v := range routers {
+		fmt.Printf("  %s     %d       %v            ", v.ID, v.Port, v.Neighbors)
+		str := "["
+		for x, y := range v.RoutingTable {
+			if y.Refused {
+				str = str + x + ", "
+			}
+		}
+		str = str + "]"
+		for {
+			if len(str) > 13 {
+				break
+			}
+			str = str + " "
+		}
+		fmt.Printf("%d                     %d                 %d\n", v.info.BroadTimes, v.info.UpdateTimes, v.info.ForwardTimes)
+	}
 }
 
 func main() {
@@ -426,9 +460,12 @@ func main() {
 
 		switch command[0] {
 		case "router": //create a new router
-			// todo validating parameters[ID, port] 2000<port<3000
+			// todo validating 2000<port<3000
 			err := initRouter(command)
-			checkError("initRouter", err)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
 			if curRouter == "none" {
 				curRouter = command[1]
 			}
@@ -450,19 +487,14 @@ func main() {
 			curRouter = command[1]
 
 		case "N": // Print activity’s adjacent list.
-			// todo input check
 			routers[curRouter].PrintAdj()
-
 		case "D":
-			//todo optional ttl, catch err
 			routers[curRouter].sendProcess(command)
 		case "P":
 			//todo
 		case "R":
-			//todo check
 			routers[curRouter].RefuseNode(command)
 		case "S":
-			//todo
 			statistics()
 		}
 	}
