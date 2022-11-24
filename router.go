@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+// TTL: Default TTL
+// MAX_HOP: Maximum TTL
 const (
 	IPv4_address = "127.0.0.1"
 	TTL          = 32
@@ -40,6 +42,7 @@ type DataPacket struct {
 	Payload     string
 }
 
+// todo usage of checkError()
 // point to router instance created by user
 var routers map[string]*Router
 
@@ -104,7 +107,7 @@ func (r *Router) Listen() {
 	}
 }
 
-func (r *Router) receivePacket() {
+func (r *Router) receivePacket() { // goroutine
 	lsAddr := &net.UDPAddr{IP: net.ParseIP(IPv4_address), Port: r.Port + 1000} // 1000 offset
 	conn, err := net.ListenUDP("udp", lsAddr)
 	checkError("net.ListenUDP", err)
@@ -122,44 +125,79 @@ func (r *Router) receivePacket() {
 		checkError("Decode", err)
 		log.Println("[DataPacket]Router " + r.ID + " receive DataPacket")
 
-		dis := r.RoutingTable[packet.Destination].Distance
-		// no neighbor
-		if len(r.Neighbors) == 0 {
-			fmt.Println("Router ", r.ID, ": No route to ", packet.Destination)
-			continue
-		}
-		// no route
-		if _, ok := r.RoutingTable[packet.Destination]; !ok {
-			fmt.Println("Router ", r.ID, ": Dropped ", packet.Destination)
-			continue
-		}
-		// unreachable
-		if dis > MAX_HOP {
-			fmt.Println("Router ", r.ID, ": Dropped ", packet.Destination)
-			continue
-		}
-		// refused
-		route := r.RoutingTable[packet.Destination].Route
-		if r.refuseCheck(route) {
-			fmt.Println("Router ", r.ID, ": Refuse route to ", packet.Destination)
-			continue
-		}
-
-		// destination
-		if packet.Destination == r.ID { // arrive
-			fmt.Println("Router ", r.ID, ": Destination ", packet.Destination)
-		} else if packet.TTL == 0 { // ttl = 0
-			fmt.Println("Router ", r.ID, ": Time exceeded ", packet.Destination)
-		} else if dis == 1 { // neighbor is des
-			err := r.sendPacket(packet.Source, packet.Destination, packet.TTL-1, packet.Payload)
-			checkError("sendPacket neighbor", err)
-			fmt.Println("Router ", r.ID, ": Direct to ", packet.Destination)
-		} else if dis > 1 && dis < MAX_HOP { // forward
-			err := r.sendPacket(packet.Source, packet.Destination, packet.TTL-1, packet.Payload)
-			checkError("sendPacket forward", err)
-			fmt.Println("Router ", r.ID, ": Forward to ", packet.Destination)
+		err = r.forward(packet)
+		if err != nil {
+			fmt.Println("[Faild] Router ", r.ID, ": ", err)
 		}
 	}
+}
+
+func (r *Router) forward(packet DataPacket) error {
+	dis := r.RoutingTable[packet.Destination].Distance
+	var err error = nil
+	if packet.Destination == r.ID { // arrive
+		fmt.Println("Router", r.ID, "Destination ", packet.Destination)
+		return nil
+	}
+
+	if len(r.Neighbors) == 0 { // no neighbor
+		return fmt.Errorf("No route to %s", packet.Destination)
+	}
+	if _, ok := r.RoutingTable[packet.Destination]; !ok { // no route
+		return fmt.Errorf("Dropped %s", packet.Destination)
+	}
+	if dis > MAX_HOP { // unreachable
+		return fmt.Errorf("Dropped %s", packet.Destination)
+	}
+	route := r.RoutingTable[packet.Destination].Route
+	if r.refuseCheck(route) { // refused
+		return fmt.Errorf("Refuse route to %s", packet.Destination)
+	}
+	if packet.TTL == 0 { // ttl = 0
+		return fmt.Errorf("Time exceeded %s", packet.Destination)
+	}
+
+	if dis == 1 { // neighbor is des
+		err = r.sendPacket(packet.Source, packet.Destination, packet.TTL-1, packet.Payload)
+		if err != nil {
+			return err
+		}
+		fmt.Println("Router", r.ID, ": Direct to ", packet.Destination)
+	} else if dis > 1 && dis < MAX_HOP { // forward
+		err = r.sendPacket(packet.Source, r.RoutingTable[packet.Destination].Route[0], packet.TTL-1, packet.Payload)
+		if err != nil {
+			return err
+		}
+		fmt.Println("Router", r.ID, ": Forward to ", packet.Destination)
+	}
+	return err
+}
+
+func (r *Router) sendPacket(src string, des string, ttl int, payload string) error { // reassembly & sending
+	address := IPv4_address + ":" + strconv.Itoa(routers[des].Port+1000)
+	dstAddr, err := net.ResolveUDPAddr("udp", address)
+	checkError("ResolveUDPAddr", err)
+
+	conn, err := net.DialUDP("udp", nil, dstAddr)
+	checkError("DialUDP", err)
+	defer conn.Close()
+
+	//reassembly
+	pack := &DataPacket{
+		Source:      src,
+		Destination: payload,
+		TTL:         ttl,
+		Payload:     payload,
+	}
+	var network bytes.Buffer
+	enc := gob.NewEncoder(&network)
+	gob.Register(pack) //Regist type
+	err = enc.Encode(pack)
+	checkError("Encode", err)
+	_, err = conn.Write(network.Bytes())
+	defer network.Reset()
+
+	return err
 }
 
 func (r *Router) refuseCheck(route []string) bool {
@@ -188,7 +226,7 @@ func (r *Router) Broadcast() {
 	}
 }
 
-func (r *Router) sendRoutingTable(dstAddr *net.UDPAddr) error { //todo r *Router, done, tobe test
+func (r *Router) sendRoutingTable(dstAddr *net.UDPAddr) error {
 	//srcAddr := &net.UDPAddr{IP: net.IP(IPv4_address), Port: r.Port}
 	conn, err := net.DialUDP("udp", nil, dstAddr) // use random port to send data
 	checkError("DialUDP", err)
@@ -213,7 +251,7 @@ func (r *Router) printTable() {
 		if r.ID == k {
 			continue
 		}
-		fmt.Print("     ", k, "            ", v.Distance, "          ")
+		fmt.Print("     ", k, "            ", v.Distance, "         ")
 		for i := 0; i < len(v.Route); i++ {
 			fmt.Print(v.Route[i])
 			if i < len(v.Route)-1 {
@@ -222,34 +260,6 @@ func (r *Router) printTable() {
 		}
 		fmt.Println()
 	}
-}
-
-func (r *Router) sendPacket(src string, des string, ttl int, payload string) error { // reassembly & sending
-	//todo, done, to be test
-	address := IPv4_address + ":" + strconv.Itoa(routers[des].Port)
-	dstAddr, err := net.ResolveUDPAddr("udp", address)
-	checkError("ResolveUDPAddr", err)
-
-	conn, err := net.DialUDP("udp", nil, dstAddr)
-	checkError("DialUDP", err)
-	defer conn.Close()
-
-	//reassembly
-	pack := &DataPacket{
-		Source:      src,
-		Destination: des,
-		TTL:         ttl,
-		Payload:     payload,
-	}
-	var network bytes.Buffer
-	enc := gob.NewEncoder(&network)
-	gob.Register(pack) //Regist type
-	err = enc.Encode(pack)
-	checkError("Encode", err)
-	_, err = conn.Write(network.Bytes())
-	defer network.Reset()
-
-	return err
 }
 
 func checkError(head string, err error) {
@@ -296,6 +306,7 @@ func initRouter(input []string) error { // nbs contain nbs' port
 
 	go routers[cur].Listen()
 	go routers[cur].Broadcast()
+	go routers[cur].receivePacket()
 	fmt.Println("[INFO]init Router id: " + cur + ", port: " + input[2])
 
 	return nil
@@ -363,6 +374,29 @@ func (r *Router) RefuseNode(input []string) error {
 	return nil
 }
 
+func (r *Router) sendProcess(input []string) error {
+	var ttl int = TTL
+	if len(input) == 3 { // 用户提供自定义ttl
+		v, _ := strconv.Atoi(input[2])
+		if v >= 0 && v < MAX_HOP { // validate
+			ttl = v
+		}
+	}
+
+	packet := &DataPacket{
+		Source:      r.ID,
+		Destination: input[1],
+		TTL:         ttl,
+		Payload:     input[1],
+	}
+	err := r.forward(*packet)
+	if err != nil {
+		fmt.Println("[Faild] Router ", r.ID, ": ", err)
+	}
+
+	return err
+}
+
 func statistics() {
 	//num of routers
 	//router list (id, port, nbs)
@@ -416,12 +450,12 @@ func main() {
 			curRouter = command[1]
 
 		case "N": // Print activity’s adjacent list.
-			// to be test
+			// todo input check
 			routers[curRouter].PrintAdj()
 
 		case "D":
-			//todo
-			//optional ttl
+			//todo optional ttl, catch err
+			routers[curRouter].sendProcess(command)
 		case "P":
 			//todo
 		case "R":
