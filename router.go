@@ -5,9 +5,12 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,9 +20,9 @@ import (
 // MAX_HOP: Maximum TTL
 const (
 	IPv4_address = "127.0.0.1"
-	TTL          = 32
-	LOOP         = 30
+	TTL          = 15
 	MAX_HOP      = 16
+	LOOP         = 30
 )
 
 type Router struct {
@@ -32,6 +35,7 @@ type Router struct {
 
 type TableEntry struct {
 	Refused  bool
+	Priority bool
 	Route    []string
 	Distance int
 }
@@ -52,6 +56,7 @@ type InfoSet struct {
 // todo usage of checkError()
 // point to router instance created by user
 var routers map[string]*Router
+var logName string
 
 func (r *Router) Listen() {
 	lsAddr := &net.UDPAddr{IP: net.ParseIP(IPv4_address), Port: r.Port}
@@ -69,31 +74,32 @@ func (r *Router) Listen() {
 		var srcRouter Router
 		err = decoder.Decode(&srcRouter) //input must be memory address
 		checkError("Decode", err)
-		log.Println("[Receive]Router " + r.ID + " receive table from [Router " + srcRouter.ID + "]")
+		log.Println("[Receive  ]Router " + r.ID + " receive table from [Router " + srcRouter.ID + "]")
 
 		srcTable := srcRouter.RoutingTable
 		for k, v := range srcTable {
-			if r.RoutingTable[k].Refused { // destination is refused todo
-				continue
-			}
 			if _, ok := r.RoutingTable[k]; ok { //already existed
+				if r.RoutingTable[k].Refused || r.RoutingTable[k].Priority { // destination is refused OR set priority route
+					continue
+				}
 				var tobeUpdate bool = false
 				// 排除自路由项&邻居的自路由项
 				if (r.ID != k) && len(v.Route) > 0 && (r.RoutingTable[k].Route[0] == v.Route[0]) { // 下一跳相同
 					if !r.refuseCheck(v.Route) { // 不包含refused node 更新
 						tobeUpdate = true
-						log.Println("[Update][router-" + r.ID + ", from-" + srcRouter.ID + ", des-" + k + "]node already existed, same next hop")
+						log.Println("[Update   ][router-" + r.ID + ", from-" + srcRouter.ID + ", des-" + k + "]node already existed, same next hop")
 					}
 
 				} else if r.RoutingTable[k].Distance > v.Distance+1 { // 下一跳不同且path更短
 					if !r.refuseCheck(v.Route) { // 不包含refused node 更新
 						tobeUpdate = true
-						log.Println("[Update][router-" + r.ID + ", from-" + srcRouter.ID + ", des-" + k + "]node already existed, different next hop")
+						log.Println("[Update   ][router-" + r.ID + ", from-" + srcRouter.ID + ", des-" + k + "]node already existed, different next hop")
 					}
 				}
 				if tobeUpdate { // update routing table
 					r.RoutingTable[k] = TableEntry{ //todo: 不可达的情况是否需要特殊考虑
 						Refused:  false,
+						Priority: false,
 						Distance: v.Distance + 1,
 						Route:    append([]string{srcRouter.ID}, v.Route...),
 					}
@@ -104,15 +110,14 @@ func (r *Router) Listen() {
 					r.RoutingTable[k] = TableEntry{
 						Distance: v.Distance + 1,
 						Refused:  false,
+						Priority: false,
 						Route:    append([]string{srcRouter.ID}, v.Route...),
 					}
 					r.info.UpdateTimes += 1
-					log.Println("[Update][router " + r.ID + ", des " + k + " from router " + srcRouter.ID + "" + "]new node")
+					log.Println("[Update   ][router " + r.ID + ", des " + k + " from router " + srcRouter.ID + "" + "]new node")
 				}
 			}
 		}
-		// todo: save update INFO to log
-		// todo: loop?
 	}
 }
 
@@ -179,6 +184,7 @@ func (r *Router) forward(packet DataPacket) error {
 			return err
 		}
 		fmt.Println("Router", r.ID, ": Forward to ", packet.Destination)
+		log.Println("[Forward  ]Router", r.ID, ": Forward to ", packet.Destination)
 		r.info.ForwardTimes += 1
 	}
 	return err
@@ -291,7 +297,7 @@ func checkError(head string, err error) {
 func initRouter(input []string) error { // nbs contain nbs' port
 	cur := input[1]
 	if routers[cur] != nil {
-		//log.Println("[ERROE]init faild, router " + cur + "already exist")
+		log.Println("[ERROE    ]init faild, router " + cur + "already exist")
 		return fmt.Errorf("[ERROE]init faild, router " + cur + "already exist")
 	}
 
@@ -312,6 +318,7 @@ func initRouter(input []string) error { // nbs contain nbs' port
 	//加入指向自己的路由项to broadcast
 	routers[cur].RoutingTable[cur] = TableEntry{
 		Refused:  false,
+		Priority: false,
 		Route:    []string{},
 		Distance: 0,
 	}
@@ -322,7 +329,7 @@ func initRouter(input []string) error { // nbs contain nbs' port
 	go routers[cur].Listen()
 	go routers[cur].Broadcast()
 	go routers[cur].receivePacket()
-	fmt.Println("[INFO]init Router id: " + cur + ", port: " + input[2])
+	log.Println("[INFO]init Router id: " + cur + ", port: " + input[2])
 
 	return nil
 }
@@ -377,16 +384,19 @@ func (r *Router) RefuseNode(input []string) error {
 	if _, ok := r.RoutingTable[input[1]]; ok {
 		r.RoutingTable[input[1]] = TableEntry{
 			Refused:  true,
+			Priority: false,
 			Distance: r.RoutingTable[input[1]].Distance, // 可达
 			Route:    r.RoutingTable[input[1]].Route,
 		}
 	} else {
 		r.RoutingTable[input[1]] = TableEntry{ // not exist
 			Refused:  true,
+			Priority: false,
 			Distance: MAX_HOP,
 			Route:    []string{},
 		}
 	}
+	log.Println("[Refuse   ] Router " + r.ID + "refuse node " + input[1])
 	return nil
 }
 
@@ -430,6 +440,7 @@ func (r *Router) priority(input []string) error {
 		Route:    path,
 		Distance: len(path),
 		Refused:  r.RoutingTable[desNode].Refused,
+		Priority: true,
 	}
 	return nil
 }
@@ -441,7 +452,28 @@ func statistics() {
 	fmt.Print("\n")
 	fmt.Println("  ID    Port    Neighbors    RefuseNode    [Times of Broadcast]  [Times of Update]  [Times of Forward]")
 	for _, v := range routers {
-		fmt.Printf("  %s     %d       %v            ", v.ID, v.Port, v.Neighbors)
+		//fmt.Printf("  %s     %d    %v            ", v.ID, v.Port, v.Neighbors)
+		fmt.Printf("  %s     %d       ", v.ID, v.Port)
+		nbs := "["
+		var isEmpty bool = true
+		for k, v := range v.RoutingTable {
+			if v.Distance == 1 {
+				isEmpty = false
+				nbs += k + ", "
+			}
+		}
+		if isEmpty {
+			nbs += "Empty"
+		}
+		nbs += "]"
+
+		for {
+			if len(nbs) > 13 {
+				break
+			}
+			nbs = nbs + " "
+		}
+
 		str := "["
 		for x, y := range v.RoutingTable {
 			if y.Refused {
@@ -450,20 +482,107 @@ func statistics() {
 		}
 		str = str + "]"
 		for {
-			if len(str) > 13 {
+			if len(str) > 14 {
 				break
 			}
 			str = str + " "
 		}
+		fmt.Print(nbs)
+		fmt.Print(str)
 		fmt.Printf("%d                     %d                 %d\n", v.info.BroadTimes, v.info.UpdateTimes, v.info.ForwardTimes)
 	}
 }
 
+func printLog(input []string) { // read log
+	var readLog []string
+	row := 20
+	if len(input) == 2 {
+		row, _ = strconv.Atoi(input[1])
+	} else if len(input) > 2 {
+		fmt.Println("[error]invalid input! Please check again.")
+		return
+	}
+
+	f, err := os.OpenFile(logName, os.O_RDONLY, 0)
+	if err != nil {
+		fmt.Println("[Faild]Failed to open log file: " + logName)
+		return
+	}
+	defer f.Close()
+
+	buff := make([]byte, 0, 4096)
+	char := make([]byte, 1)
+
+	stat, _ := f.Stat()
+	filesize := stat.Size()
+
+	var cursor int64 = 0
+	cnt := 0
+	for {
+		cursor -= 1
+		_, _ = f.Seek(cursor, io.SeekEnd)
+		_, err = f.Read(char)
+		if err != nil {
+			fmt.Println("[Faild]Failed to open log file: " + logName)
+			return
+		}
+
+		if char[0] == '\n' {
+			if len(buff) > 0 {
+				revers(buff)
+				// 读取到的行
+				readLog = append(readLog, string(buff))
+				cnt++
+				if cnt == row {
+					// 超过数量退出
+					break
+				}
+
+			}
+			buff = buff[:0]
+		} else {
+			buff = append(buff, char[0])
+		}
+
+		if cursor == -filesize {
+			break
+		}
+	}
+
+	for i := len(readLog) - 1; i >= 0; i-- {
+		fmt.Println(readLog[i])
+	}
+	return
+}
+
+func revers(s []byte) {
+	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+		s[i], s[j] = s[j], s[i]
+	}
+}
+
+func GetAppPath() string {
+	file, _ := exec.LookPath(os.Args[0])
+	path, _ := filepath.Abs(file)
+	index := strings.LastIndex(path, string(os.PathSeparator))
+
+	return path[:index]
+}
+
 func main() {
 	fmt.Println("[INFO]The router execution environment is initialized successfully!")
-	fmt.Println("[warm]NO ROUTER in the environment!")
+	fmt.Println("[WARM]NO ROUTER in the environment!")
 	fmt.Println("[INFO]You can use command [router ID myport port1 port2 port3…] to create a router")
 	fmt.Println("[INFO]Example: router 4 3004 3003 3006 3005")
+
+	timeStr := time.Now().Format("2006-01-02_15:04:05")
+	logName = "/Log/" + timeStr + ".txt"
+	logName = GetAppPath() + logName
+	logFile, err := os.OpenFile(logName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
+	if err != nil {
+		panic(err)
+	}
+	log.SetOutput(logFile)
 
 	// 分配内存空间，nil map 不能赋值
 	routers = make(map[string]*Router)
@@ -471,7 +590,7 @@ func main() {
 	var curRouter string = "none"
 	for {
 		fmt.Println("\nCurrent Router: " + curRouter)
-		fmt.Print("> ")
+		//fmt.Print("> ")
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
 		checkError("ReadString", err)
@@ -521,6 +640,10 @@ func main() {
 			routers[curRouter].RefuseNode(command)
 		case "S":
 			statistics()
+		case "L":
+			printLog(command)
+		case "exit":
+			return
 		}
 	}
 }
